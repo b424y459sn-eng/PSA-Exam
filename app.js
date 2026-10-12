@@ -8,7 +8,7 @@
   const Q = Object.fromEntries(QUESTIONS.map((q) => [q.id, q]));
   const SEC = Object.fromEntries(SECTIONS.map((s) => [s.key, s]));
   const STORE_KEY = "psa-trainer-v1";
-  const DEFAULT_EXAM = "2027-01-28";
+  const DEFAULT_EXAM = "2026-10-22";
   const MOCK_MINUTES = 120;
 
   /* ───────── storage (per-browser; the app works without it) ───────── */
@@ -27,6 +27,8 @@
     { examDate: DEFAULT_EXAM, startDate: todayISO(), results: {}, dayDone: {}, cards: {}, mocks: [], view: "plan" },
     load() || {}
   );
+  // The first release used 28 Jan 2027 as a placeholder; move anyone still on it to the booked sitting.
+  if (state.examDate === "2027-01-28") state.examDate = DEFAULT_EXAM;
   function save() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
   }
@@ -103,8 +105,20 @@
     const days = DAYS.map((d, i) => ({ n: d.n, date: addDays(start, Math.floor(i * gap)) }));
     const after = addDays(days[days.length - 1].date, 1);
     const mocks = [];
-    for (let dte = addDays(days[days.length - 1].date, 7); diffDays(dte, exam) >= 2; dte = addDays(dte, 7)) mocks.push(dte);
-    return { days, after, mocks, daysLeft, runway };
+    const last = days[days.length - 1].date;
+    for (let dte = addDays(last, 7); diffDays(dte, exam) >= 2; dte = addDays(dte, 7)) mocks.push(dte);
+    // Short runway: still fit a second mock two days before the exam.
+    if (!mocks.length && diffDays(last, exam) >= 3) mocks.push(addDays(exam, -2));
+    // With two weeks or less after Day 7, plan each remaining day explicitly.
+    const tail = [];
+    const gapDays = diffDays(after, exam);
+    if (gapDays >= 0 && gapDays <= 14) {
+      for (let dte = after; diffDays(dte, exam) > 0; dte = addDays(dte, 1)) {
+        const kind = mocks.includes(dte) ? "mock" : diffDays(dte, exam) === 1 ? "light" : "drill";
+        tail.push({ date: dte, kind });
+      }
+    }
+    return { days, after, mocks, tail, daysLeft, runway };
   }
   function currentDay() {
     for (const d of DAYS) if (!state.dayDone[d.n]) return d.n;
@@ -183,6 +197,17 @@
       </tr>`;
     }).join("");
 
+    const weak = SECTIONS.map((s) => ({ s, m: sectionMastery(s.key) })).filter((x) => x.m.pct !== null).sort((a, b) => a.m.pct - b.m.pct).slice(0, 2);
+    const weakText = weak.length ? weak.map((w) => w.s.name).join(" and ") : "your weakest sections (shown after Day 7)";
+    const tailLabel = {
+      drill: [`<button class="link" data-go="drills">Drills: ${esc(weakText)}</button> + recall cards`, "20–40 min"],
+      mock: [`<button class="link" data-start-mock>Full mock #2</button>, then review every dropped item`, "2 h + review"],
+      light: [`<button class="link" data-go="cards">Recall cards</button> + re-read Day 1 &amp; 2 lessons. Early night`, "Light"]
+    };
+    const tailRows = sch.tail.map((t) => `<tr class="${t.date === today ? "today" : ""}">
+        <td class="tnum nowrap">${fmtDate(t.date)}</td><td>${tailLabel[t.kind][0]}</td><td class="nowrap muted">${tailLabel[t.kind][1]}</td><td></td></tr>`).join("")
+      + (sch.tail.length ? `<tr class="exam"><td class="tnum nowrap">${fmtDate(state.examDate)}</td><td><b>PSA exam</b></td><td class="nowrap muted">200 marks</td><td></td></tr>` : "");
+
     const mastery = SECTIONS.map((s) => {
       const m = sectionMastery(s.key);
       const val = m.pct;
@@ -194,7 +219,6 @@
       </div>`;
     }).join("");
 
-    const weak = SECTIONS.map((s) => ({ s, m: sectionMastery(s.key) })).filter((x) => x.m.pct !== null).sort((a, b) => a.m.pct - b.m.pct).slice(0, 2);
     const mocks = state.mocks.slice(-5).reverse().map((mk) => `<li><span class="tnum">${fmtDate(mk.date)}</span>: <b class="tnum">${mk.score}/200</b> (${pct(mk.score, 200)}%)</li>`).join("");
 
     app.innerHTML = `
@@ -214,23 +238,22 @@
           <label for="examDate">PSA sitting<input id="examDate" type="date" value="${state.examDate}"></label>
           <label for="startDate">Study plan starts<input id="startDate" type="date" value="${state.startDate}"></label>
         </div>
-        <p class="muted small">${sch.daysLeft >= 0 ? `${fmtLong(state.examDate)}: <b class="tnum">${sch.daysLeft}</b> days away.` : "That date is in the past."}
-        ${state.examDate === DEFAULT_EXAM ? " This is a placeholder (28 Jan 2027, the next published national sitting I could find). Change it to the date on your booking." : ""}</p>
+        <p class="muted small">${sch.daysLeft >= 0 ? `${fmtLong(state.examDate)}: <b class="tnum">${sch.daysLeft}</b> days away.` : "That date is in the past."}</p>
         ${sch.runway < 8 && sch.runway >= 0 ? `<p class="warn small">Less than 8 days between start and exam, so the days are compressed. Do two a day if you need to.</p>` : ""}
       </section>
 
       <section class="card">
-        <h2>Seven-day course</h2>
+        <h2>Your plan to exam day</h2>
         <div class="tbl"><table class="plan">
           <thead><tr><th>Date</th><th>Day</th><th>Weight</th><th></th></tr></thead>
-          <tbody>${rows}</tbody>
+          <tbody>${rows}${tailRows}</tbody>
         </table></div>
-        <h3>After Day 7, until exam day</h3>
+        ${sch.tail.length ? "" : `<h3>After Day 7, until exam day</h3>
         <ul class="tight">
-          <li>Most days: a 20-minute <b>drill</b> on your weakest section${weak.length ? ` (right now: <b>${weak.map((w) => w.s.name).join("</b> and <b>")}</b>)` : ""}, plus the recall cards.</li>
+          <li>Most days: a 20-minute <b>drill</b> on ${esc(weakText)}, plus the recall cards.</li>
           <li>Weekly: a <b>full mock</b>${sch.mocks.length ? ` on ${sch.mocks.slice(0, 6).map(fmtDate).join(", ")}${sch.mocks.length > 6 ? "…" : ""}` : ""}.</li>
           <li>Last 2 days before the exam: recall cards and a light re-read of the Day 1 and Day 2 lessons only.</li>
-        </ul>
+        </ul>`}
       </section>
 
       <section class="card">
